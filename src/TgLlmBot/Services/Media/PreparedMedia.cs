@@ -4,7 +4,7 @@ using System.Linq;
 namespace TgLlmBot.Services.Media;
 
 /// <summary>
-///     Вложение, готовое к показу vision-модели: собранный data-url и то, чем этот data-url
+///     Вложение, готовое к показу модели: собранный data-url и то, чем этот data-url
 ///     для модели является.
 /// </summary>
 /// <remarks>

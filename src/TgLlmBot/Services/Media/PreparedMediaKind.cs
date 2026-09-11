@@ -1,7 +1,7 @@
 namespace TgLlmBot.Services.Media;
 
 /// <summary>
-///     Чем подготовленное вложение является для vision-модели.
+///     Чем подготовленное вложение является для модели.
 /// </summary>
 public enum PreparedMediaKind
 {

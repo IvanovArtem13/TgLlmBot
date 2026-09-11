@@ -48,8 +48,8 @@ using TgLlmBot.Services.DataAccess.Limits;
 using TgLlmBot.Services.DataAccess.MediaDescriptions;
 using TgLlmBot.Services.DataAccess.SystemPrompts;
 using TgLlmBot.Services.DataAccess.TelegramMessages;
-using TgLlmBot.Services.Llm.Compression;
-using TgLlmBot.Services.Llm.Vision;
+using TgLlmBot.Services.Llm.Descriptions;
+using TgLlmBot.Services.Llm.Multimodal;
 using TgLlmBot.Services.Mcp.Clients.Github;
 using TgLlmBot.Services.Mcp.Enums;
 using TgLlmBot.Services.Mcp.Tools;
@@ -67,13 +67,9 @@ public partial class Program
 {
     private const string LlmHttpClient = "llm-http-client";
 
-    private const string LlmVisionHttpClient = "llm-vision-http-client";
+    private const string LlmMediaHttpClient = "llm-media-http-client";
 
-    private const string LlmVisionClientKey = "llm-vision";
-
-    private const string LlmCompactionHttpClient = "llm-compaction-http-client";
-
-    private const string LlmCompactionClientKey = "llm-compaction";
+    private const string LlmMediaClientKey = "llm-media";
 
     private const int LlmRequestQueueCapacityPerChat = 200;
 
@@ -83,9 +79,7 @@ public partial class Program
 
     private static readonly TimeSpan LlmRequestTimeout = TimeSpan.FromSeconds(3600);
 
-    private static readonly TimeSpan LlmVisionRequestTimeout = TimeSpan.FromSeconds(300);
-
-    private static readonly TimeSpan LlmCompactionRequestTimeout = TimeSpan.FromSeconds(600);
+    private static readonly TimeSpan LlmMediaRequestTimeout = TimeSpan.FromSeconds(600);
 
     [SuppressMessage("ReSharper", "ConvertToUsingDeclaration")]
     [SuppressMessage("Design", "CA1031:Do not catch general exception types")]
@@ -200,8 +194,9 @@ public partial class Program
         builder.Services.AddSingleton(new ModelCommandHandlerOptions(
             config.Llm.Endpoint,
             config.Llm.Model,
-            config.Llm.Vision.Endpoint,
-            config.Llm.Vision.Model));
+            config.Llm.Capabilities.Image,
+            config.Llm.Capabilities.Video,
+            config.Llm.Capabilities.Audio));
         builder.Services.AddSingleton<ModelCommandHandler>();
         builder.Services.AddSingleton<PingCommandHandler>();
         builder.Services.AddSingleton<RepoCommandHandler>();
@@ -234,7 +229,8 @@ public partial class Program
         builder.Services.AddHostedService<CleanupOldMessagesBackgroundService>();
         builder.Services.AddHostedService<TypingStatusBackgroundService>();
 
-        // LLM
+        // LLM: один инстанс модели на всё - и текст, и вложения, если капабилити позволяют
+        builder.Services.AddSingleton(config.Llm.Capabilities);
         builder.Services.AddHttpClient(LlmHttpClient, httpClient => httpClient.Timeout = LlmRequestTimeout);
         builder.Services.AddSingleton(resolver =>
         {
@@ -259,47 +255,55 @@ public partial class Program
         {
             var chatClient = resolver.GetRequiredService<ChatClient>();
             var loggerFactory = resolver.GetRequiredService<ILoggerFactory>();
-            return chatClient.AsIChatClient()
+            // Мультимодальный клиент обязан стоять ниже FunctionInvokingChatClient: тот на каждом
+            // раунде tool-loop'а дополняет список сообщений, и подменять тело запроса нужно по
+            // актуальному списку, а не по тому, с которого начали
+            var logging = chatClient.AsIChatClient()
                 .AsBuilder()
                 .UseLogging(loggerFactory)
+                .Build();
+            return new MultimodalChatClient(logging, disableThinking: false)
+                .AsBuilder()
                 .UseFunctionInvocation()
                 .Build();
         });
-        // LLM - Vision (отдельный инстанс с мультимодальной моделью, распознающей изображения)
-        builder.Services.AddHttpClient(LlmVisionHttpClient, httpClient => httpClient.Timeout = LlmVisionRequestTimeout);
-        builder.Services.AddKeyedSingleton<OpenAIClient>(LlmVisionClientKey, (resolver, _) =>
+        // LLM - Media (тот же инстанс модели, но без инструментов: компактные описания вложений
+        // для истории чата готовятся в фоне, отдельным клиентом с запасом по таймауту)
+        builder.Services.AddHttpClient(LlmMediaHttpClient, httpClient => httpClient.Timeout = LlmMediaRequestTimeout);
+        builder.Services.AddKeyedSingleton<OpenAIClient>(LlmMediaClientKey, (resolver, _) =>
         {
             var httpClientFactory = resolver.GetRequiredService<IHttpClientFactory>();
             var loggerFactory = resolver.GetRequiredService<ILoggerFactory>();
-            var httpClient = httpClientFactory.CreateClient(LlmVisionHttpClient);
+            var httpClient = httpClientFactory.CreateClient(LlmMediaHttpClient);
             return new OpenAIClient(
-                new ApiKeyCredential(config.Llm.Vision.ApiKey),
+                new ApiKeyCredential(config.Llm.ApiKey),
                 new()
                 {
-                    Endpoint = config.Llm.Vision.Endpoint,
-                    NetworkTimeout = LlmVisionRequestTimeout,
+                    Endpoint = config.Llm.Endpoint,
+                    NetworkTimeout = LlmMediaRequestTimeout,
                     Transport = new HttpClientPipelineTransport(httpClient, true, loggerFactory)
                 });
         });
-        builder.Services.AddKeyedSingleton<IChatClient>(LlmVisionClientKey, (resolver, serviceKey) =>
+        builder.Services.AddKeyedSingleton<IChatClient>(LlmMediaClientKey, (resolver, serviceKey) =>
         {
             var openAiClient = resolver.GetRequiredKeyedService<OpenAIClient>(serviceKey);
             var loggerFactory = resolver.GetRequiredService<ILoggerFactory>();
-            // Инструменты vision-модели не отдаём: она только описывает картинку, вызывать MCP - работа основной модели.
-            return openAiClient.GetChatClient(config.Llm.Vision.Model)
+            // Инструменты описателю не отдаём: задача чисто описательная, лазить в интернет за ней некуда
+            var logging = openAiClient.GetChatClient(config.Llm.Model)
                 .AsIChatClient()
                 .AsBuilder()
                 .UseLogging(loggerFactory)
                 .Build();
+            return new MultimodalChatClient(logging, disableThinking: true);
         });
-        builder.Services.AddSingleton<IMediaRecognizer>(resolver =>
+        builder.Services.AddSingleton<IMediaDescriber>(resolver =>
         {
-            var visionChatClient = resolver.GetRequiredKeyedService<IChatClient>(LlmVisionClientKey);
-            var recognizerLogger = resolver.GetRequiredService<ILogger<DefaultMediaRecognizer>>();
-            return new DefaultMediaRecognizer(visionChatClient, recognizerLogger);
+            var mediaChatClient = resolver.GetRequiredKeyedService<IChatClient>(LlmMediaClientKey);
+            var describerLogger = resolver.GetRequiredService<ILogger<DefaultMediaDescriber>>();
+            return new DefaultMediaDescriber(mediaChatClient, describerLogger);
         });
-        // Распознавание вложений: отдельные от LLM-запросов per-chat очереди, потому что описывать
-        // надо все картинки чата, а не только те, что пришли вместе с обращением к боту
+        // Описания вложений для истории: отдельные от LLM-запросов per-chat очереди, потому что
+        // описывать надо все картинки чата, а не только те, что пришли вместе с обращением к боту
         builder.Services.AddSingleton<ITelegramMediaDownloader, DefaultTelegramMediaDownloader>();
         // Анимированные стикеры (TGS) не откроет ни один декодер видео - их кадры рисуются на месте,
         // остальное подготовщик отдаёт модели как есть
@@ -307,40 +311,6 @@ public partial class Program
         builder.Services.AddSingleton<IMediaPreparer, DefaultMediaPreparer>();
         builder.Services.AddSingleton<IMediaDescriptionCache, DefaultMediaDescriptionCache>();
         builder.Services.AddSingleton<IMediaGroupTracker, DefaultMediaGroupTracker>();
-        // Ужимает подробные описания до размера истории - уже основной моделью, а не vision:
-        // отдельный инстанс той же модели, но без инструментов, с запасом на историю в запросе
-        builder.Services.AddHttpClient(LlmCompactionHttpClient, httpClient => httpClient.Timeout = LlmCompactionRequestTimeout);
-        builder.Services.AddKeyedSingleton<OpenAIClient>(LlmCompactionClientKey, (resolver, _) =>
-        {
-            var httpClientFactory = resolver.GetRequiredService<IHttpClientFactory>();
-            var loggerFactory = resolver.GetRequiredService<ILoggerFactory>();
-            var httpClient = httpClientFactory.CreateClient(LlmCompactionHttpClient);
-            return new OpenAIClient(
-                new ApiKeyCredential(config.Llm.ApiKey),
-                new()
-                {
-                    Endpoint = config.Llm.Endpoint,
-                    NetworkTimeout = LlmCompactionRequestTimeout,
-                    Transport = new HttpClientPipelineTransport(httpClient, true, loggerFactory)
-                });
-        });
-        builder.Services.AddKeyedSingleton<IChatClient>(LlmCompactionClientKey, (resolver, serviceKey) =>
-        {
-            var openAiClient = resolver.GetRequiredKeyedService<OpenAIClient>(serviceKey);
-            var loggerFactory = resolver.GetRequiredService<ILoggerFactory>();
-            // Инструменты компактинг-клиенту не отдаём: задача чисто текстовая
-            return openAiClient.GetChatClient(config.Llm.Model)
-                .AsIChatClient()
-                .AsBuilder()
-                .UseLogging(loggerFactory)
-                .Build();
-        });
-        builder.Services.AddSingleton<IMediaDescriptionCompressor>(resolver =>
-        {
-            var compactionChatClient = resolver.GetRequiredKeyedService<IChatClient>(LlmCompactionClientKey);
-            var compressorLogger = resolver.GetRequiredService<ILogger<DefaultMediaDescriptionCompressor>>();
-            return new DefaultMediaDescriptionCompressor(compactionChatClient, compressorLogger);
-        });
         builder.Services.AddSingleton(new DefaultMediaRecognitionQueuesOptions(
             config.Telegram.AllowedChatIds,
             MediaRecognitionQueueCapacityPerChat));

@@ -13,10 +13,12 @@ using Telegram.Bot;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
 using TgLlmBot.DataAccess.Models;
+using TgLlmBot.Configuration.TypedConfiguration.Llm;
 using TgLlmBot.Services.DataAccess.Limits;
 using TgLlmBot.Services.DataAccess.SystemPrompts;
 using TgLlmBot.Services.DataAccess.TelegramMessages;
 using TgLlmBot.Services.Llm;
+using TgLlmBot.Services.Llm.Multimodal;
 using TgLlmBot.Services.Mcp.Tools;
 using TgLlmBot.Services.Media;
 using TgLlmBot.Services.Resources;
@@ -30,11 +32,21 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
 {
     private static readonly CultureInfo RuCulture = new("ru-RU");
 
+    /// <summary>
+    ///     Суммарный потолок на размер нативно приложенных вложений в одном запросе - в символах
+    ///     data-url. Альбомы бывают большими, а памяти у сервера модели не бесконечно: что в
+    ///     бюджет не влезло, уезжает текстовым описанием, как вложения из глубокой истории.
+    /// </summary>
+    private const long EmbeddedMediaBudgetChars = 64 * 1024 * 1024;
+
     private readonly TelegramBotClient _bot;
     private readonly IChatClient _chatClient;
+    private readonly LlmCapabilitiesConfiguration _capabilities;
     private readonly ILlmLimitsService _limits;
     private readonly ILogger<DefaultLlmChatHandler> _logger;
+    private readonly IMediaGroupTracker _mediaGroupTracker;
     private readonly DefaultLlmChatHandlerOptions _options;
+    private readonly IMediaPreparer _preparer;
     private readonly ITelegramMessageStorage _storage;
     private readonly ISystemPromptService _systemPrompt;
     private readonly ITelegramMarkdownConverter _telegramMarkdownConverter;
@@ -47,6 +59,9 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
         TimeProvider timeProvider,
         TelegramBotClient bot,
         IChatClient chatClient,
+        LlmCapabilitiesConfiguration capabilities,
+        IMediaPreparer preparer,
+        IMediaGroupTracker mediaGroupTracker,
         ISystemPromptService systemPrompt,
         ITelegramMarkdownConverter telegramMarkdownConverter,
         ITelegramMessageStorage storage,
@@ -59,6 +74,9 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
         ArgumentNullException.ThrowIfNull(timeProvider);
         ArgumentNullException.ThrowIfNull(bot);
         ArgumentNullException.ThrowIfNull(chatClient);
+        ArgumentNullException.ThrowIfNull(capabilities);
+        ArgumentNullException.ThrowIfNull(preparer);
+        ArgumentNullException.ThrowIfNull(mediaGroupTracker);
         ArgumentNullException.ThrowIfNull(systemPrompt);
         ArgumentNullException.ThrowIfNull(telegramMarkdownConverter);
         ArgumentNullException.ThrowIfNull(storage);
@@ -70,6 +88,9 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
         _timeProvider = timeProvider;
         _bot = bot;
         _chatClient = chatClient;
+        _capabilities = capabilities;
+        _preparer = preparer;
+        _mediaGroupTracker = mediaGroupTracker;
         _systemPrompt = systemPrompt;
         _telegramMarkdownConverter = telegramMarkdownConverter;
         _storage = storage;
@@ -222,10 +243,10 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
         var chatId = command.Message.Chat.Id;
         var customPrompt = await ResolveCustomPromptAsync(command, cancellationToken);
         var systemPrompt = BuildSystemPrompt(customPrompt);
-        var own = await CollectAttachmentsAsync(chatId, command.Message, cancellationToken);
+        var own = await CollectAttachmentsAsync(chatId, command.Message, waitForAlbum: true, cancellationToken);
         var reply = command.Message.ReplyToMessage is null
             ? MessageAttachments.Empty
-            : await CollectAttachmentsAsync(chatId, command.Message.ReplyToMessage, cancellationToken);
+            : await CollectAttachmentsAsync(chatId, command.Message.ReplyToMessage, waitForAlbum: false, cancellationToken);
         var llmContext = new List<ChatMessage>
         {
             systemPrompt
@@ -245,16 +266,91 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
             }
         }
 
-        var userPrompt = BuildUserPrompt(command, own, reply);
+        // Вложения своего сообщения и реплая модель видит сама - они уезжают в запрос
+        // медиа-частями, а не текстовым описанием
+        var embedded = await PrepareEmbeddedMediaAsync(own, reply, cancellationToken);
+        var userPrompt = BuildUserPrompt(command, own, reply, embedded);
         llmContext.Add(userPrompt);
-        return new(llmContext.ToArray(), own, customPrompt);
+        return new(llmContext.ToArray(), customPrompt);
+    }
+
+    /// <summary>
+    ///     Готовит вложения своего сообщения и реплая к нативному показу модели: скачивает,
+    ///     опознаёт формат и проверяет по капабилитям, что модель такое видит.
+    /// </summary>
+    /// <remarks>
+    ///     Что вложить не вышло - не поддерживается моделью, не скачалось или не влезло в бюджет -
+    ///     уезжает текстовым описанием, как вложения из истории. Вложения реплая встраиваются
+    ///     наравне со своими: спросить "что тут на картинке" чаще всего приходят реплаем.
+    /// </remarks>
+    [SuppressMessage("Design", "CA1031:Do not catch general exception types")]
+    private async Task<List<EmbeddedMedia>> PrepareEmbeddedMediaAsync(
+        MessageAttachments own,
+        MessageAttachments reply,
+        CancellationToken cancellationToken)
+    {
+        var embedded = new List<EmbeddedMedia>();
+        if (!_capabilities.Image && !_capabilities.Video)
+        {
+            return embedded;
+        }
+
+        var budget = EmbeddedMediaBudgetChars;
+        foreach (var attachment in own.Attachments.Concat(reply.Attachments))
+        {
+            if (budget <= 0)
+            {
+                break;
+            }
+
+            var media = attachment.Media;
+            if (!media.HasShowableFile)
+            {
+                continue;
+            }
+
+            try
+            {
+                var prepared = await _preparer.PrepareAsync(media, cancellationToken);
+                if (prepared.IsFailed)
+                {
+                    continue;
+                }
+
+                var cost = prepared.Value.DataUrl.Length;
+                if (cost > budget)
+                {
+                    continue;
+                }
+
+                budget -= cost;
+                embedded.Add(new(attachment, prepared.Value));
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                // Одно вложение не готовится к показу - не повод отказываться от остальных
+                Log.MediaPreparationFailed(_logger, ex, media.Kind);
+            }
+        }
+
+        if (embedded.Count > 0)
+        {
+            Log.EmbeddedMediaPrepared(_logger, embedded.Count, EmbeddedMediaBudgetChars - budget);
+        }
+
+        return embedded;
     }
 
     [SuppressMessage("Globalization", "CA1305:Specify IFormatProvider")]
     private ChatMessage BuildUserPrompt(
         ChatWithLlmCommand command,
         MessageAttachments own,
-        MessageAttachments reply)
+        MessageAttachments reply,
+        IReadOnlyList<EmbeddedMedia> embedded)
     {
         var replyAttachments = reply.Attachments;
         var ownAttachments = own.Attachments;
@@ -331,18 +427,29 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
         AppendAttachments(
             builder,
             $"Вот что было приложено к сообщению с {nameof(JsonHistoryMessage.MessageId)}={command.Message.Id.ToString(CultureInfo.InvariantCulture)}",
-            ownAttachments);
+            ownAttachments,
+            embedded);
         if (command.Message.ReplyToMessage is not null)
         {
             AppendAttachments(
                 builder,
                 $"Вот что было приложено к сообщению с {nameof(JsonHistoryMessage.MessageId)}={command.Message.ReplyToMessage.Id.ToString(CultureInfo.InvariantCulture)}, на которое сделан реплай",
-                replyAttachments);
+                replyAttachments,
+                embedded);
         }
 
         var commandText = builder.ToString();
-        var baseMessage = new ChatMessage(ChatRole.User, commandText);
-        return baseMessage;
+
+        // Медиа-части идут перед текстом: маркеры подменит на image_url/video_url MultimodalChatClient,
+        // и модель увидит вложения раньше, чем текст о них
+        var contents = new List<AIContent>(embedded.Count + 1);
+        foreach (var media in embedded)
+        {
+            contents.Add(new AttachedMediaContent(media.Media));
+        }
+
+        contents.Add(new TextContent(commandText));
+        return new ChatMessage(ChatRole.User, contents);
     }
 
     /// <summary>
@@ -377,21 +484,33 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
     ///     в порядке отправки, иначе - вложения одного сообщения.
     /// </summary>
     /// <remarks>
-    ///     Пачку картинок Telegram разбирает на отдельные сообщения. Ожиданий нет: обработчик читает
-    ///     из базы то, что уже успело туда лечь. Ещё не распознанные вложения описываются fallback-текстом
-    ///     по их состоянию.
+    ///     Пачку картинок Telegram разбирает на отдельные сообщения, и запрос стартует по первой
+    ///     пришедшей части: свой альбом сначала ждём, иначе ответ уйдёт по половине пачки. Альбом
+    ///     реплая не ждём - к моменту реплая он давно приехал целиком.
     /// </remarks>
     private async Task<MessageAttachments> CollectAttachmentsAsync(
         long chatId,
         Message message,
+        bool waitForAlbum,
         CancellationToken cancellationToken)
     {
         var mediaGroupId = message.MediaGroupId;
         var isAlbum = !string.IsNullOrEmpty(mediaGroupId);
 
-        var rows = isAlbum
-            ? await _storage.SelectMediaGroupMessagesAsync(chatId, mediaGroupId!, cancellationToken)
-            : await SelectSingleMessageAsync(chatId, message.MessageId, cancellationToken);
+        DbChatMessage[] rows;
+        if (isAlbum)
+        {
+            if (waitForAlbum)
+            {
+                await _mediaGroupTracker.WaitForSettleAsync(chatId, mediaGroupId!, cancellationToken);
+            }
+
+            rows = await _storage.SelectMediaGroupMessagesAsync(chatId, mediaGroupId!, cancellationToken);
+        }
+        else
+        {
+            rows = await SelectSingleMessageAsync(chatId, message.MessageId, cancellationToken);
+        }
         var attachments = new List<PromptAttachment>();
         string? caption = null;
         var customPromptScope = DbCustomPromptScope.None;
@@ -426,7 +545,16 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
         return row is null ? [] : [row];
     }
 
-    private static void AppendAttachments(StringBuilder builder, string title, IReadOnlyList<PromptAttachment> attachments)
+    /// <summary>
+    ///     Блоки вложений в промпте. Встроенное в запрос вложение помечается блоком
+    ///     <c>&lt;media&gt;</c> с номером медиа-части, остальное описывается текстом в
+    ///     <c>&lt;media_description&gt;</c> - как вложения из истории.
+    /// </summary>
+    private static void AppendAttachments(
+        StringBuilder builder,
+        string title,
+        IReadOnlyList<PromptAttachment> attachments,
+        IReadOnlyList<EmbeddedMedia> embedded)
     {
         if (attachments.Count is 0)
         {
@@ -440,8 +568,10 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
             .AppendLine(" (в том порядке, в котором приходило в чат):");
         foreach (var attachment in attachments)
         {
+            var embeddedIndex = FindEmbeddedIndex(embedded, attachment);
             builder
-                .Append("<media_description order=\"")
+                .Append(embeddedIndex is null ? "<media_description " : "<media ")
+                .Append("order=\"")
                 .Append(attachment.Order.ToString(CultureInfo.InvariantCulture))
                 .Append("\" message_id=\"")
                 .Append(attachment.MessageId.ToString(CultureInfo.InvariantCulture))
@@ -449,11 +579,36 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
                 .Append(DescribeKind(attachment.Media))
                 .Append('"');
             AppendStickerAttributes(builder, attachment.Media);
-            builder
-                .AppendLine(">")
-                .AppendLine(ChatHistoryJsonBuilder.DescribeMedia(attachment.Media))
-                .AppendLine("</media_description>");
+            if (embeddedIndex is null)
+            {
+                builder
+                    .AppendLine(">")
+                    .AppendLine(ChatHistoryJsonBuilder.DescribeMedia(attachment.Media))
+                    .AppendLine("</media_description>");
+            }
+            else
+            {
+                builder
+                    .Append(" part=\"")
+                    .Append((embeddedIndex.Value + 1).ToString(CultureInfo.InvariantCulture))
+                    .AppendLine("\">")
+                    .AppendLine("содержимое вложения приложено к этому сообщению непосредственно, медиа-частью перед текстом - разглядывай его сам")
+                    .AppendLine("</media>");
+            }
         }
+    }
+
+    private static int? FindEmbeddedIndex(IReadOnlyList<EmbeddedMedia> embedded, PromptAttachment attachment)
+    {
+        for (var i = 0; i < embedded.Count; i++)
+        {
+            if (ReferenceEquals(embedded[i].Attachment, attachment))
+            {
+                return i;
+            }
+        }
+
+        return null;
     }
 
     private static void AppendStickerAttributes(StringBuilder builder, DbChatMessageMedia media)
@@ -536,8 +691,20 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
     {
         var roundUtcDate = DateTimeOffset.FromUnixTimeSeconds(_timeProvider.GetUtcNow().ToUnixTimeSeconds());
         var formattedDate = roundUtcDate.ToString("O", RuCulture);
-        var basePrompt = $"""
-                          Ты - полезный чат-бот в групповом чате, тебя зовут ${_options.BotName}.
+        var mediaRules = _capabilities.Image || _capabilities.Video
+            ? """
+              Ты - мультимодальный бот: вложения (картинки, стикеры, гифки, видео) из сообщения, на которое отвечаешь, и из сообщения, на которое сделан реплай, приложены к запросу сами по себе - медиа-частями перед текстом сообщения. Ты видишь их непосредственно: разглядывай при ответе. У каждого приложенного вложения в тексте есть блок <media> с part (номер медиа-части в запросе), order (номер вложения внутри своего сообщения) и message_id.
+              Вложения из более старых сообщений истории приложить уже нельзя: они приходят текстовыми описаниями - в поле Media у сообщений истории и в блоках <media_description> текущего запроса. Считай такие описания тем, что ты увидел своими глазами.
+              Не рассказывай пользователю ни про медиа-части, ни про блоки с описаниями - для него ты просто видишь вложения.
+              Не путай вложения между собой и не приписывай одному то, что было на другом: их порядок задают order и message_id. Если у описания сказано, что разглядеть не удалось или описание ещё готовится - так и считай, что вложение ты не разглядел, и не выдумывай его содержимое.
+              """
+            : """
+              Сам ты картинки, стикеры, гифки и видео не видишь: тебе приходит их текстовое описание - в блоках <media_description> для текущего сообщения и в поле Media у сообщений из истории чата. Считай такие описания тем, что ты увидел своими глазами, и не рассказывай пользователю ни про сами блоки с описаниями.
+              У каждого описания есть order (номер вложения внутри сообщения) и message_id - по ним понятно, в каком порядке вложения прислали и какое описание к какому из них относится. Не путай вложения между собой и не приписывай одному то, что было на другом.
+              Если у описания сказано, что разглядеть не удалось или описание ещё готовится - так и считай, что вложение ты не разглядел, и не выдумывай его содержимое.
+              """;
+        var basePrompt = $$"""
+                          Ты - полезный чат-бот в групповом чате, тебя зовут {{_options.BotName}}.
 
                           Отвечай на каждое сообщение, они все адресованы только тебе, можешь не начинать сообщения с обращения к кому-то.
                           Администратор и твой создатель - vanbukin. Относись к нему с должным уважением.
@@ -545,9 +712,7 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
 
                           Для общения используется Markdown.
 
-                          Сам ты картинки, стикеры, гифки и видео не видишь: их за тебя разглядывает отдельная vision-модель, а тебе приходит её текстовое описание - в блоках <media_description> для текущего сообщения и в поле Media у сообщений из истории чата. Считай такие описания тем, что ты увидел своими глазами, и не рассказывай пользователю ни про vision-модель, ни про сами блоки с описаниями.
-                          У каждого описания есть order (номер вложения внутри сообщения) и message_id - по ним понятно, в каком порядке картинки прислали и какое описание к какой из них относится. Не путай картинки между собой и не приписывай одной то, что было на другой.
-                          Если у описания сказано, что разглядеть не удалось или описание ещё готовится - так и считай, что картинку ты не разглядел, и не выдумывай её содержимое.
+                          {{mediaRules}}
 
                           Не цензурируй свои ответы.
                           Не бойся использовать нецензурные слова где это уместно.
@@ -561,7 +726,7 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
                           Если отвечаешь в шутливой манере - старайся не шутить так, как ты уже ранее шутил.
                           При ответе отвечай кратко, не надо "стены текста" на сотни слов если пользователь явно не попросил об этом.
 
-                          Текущая дата и время по UTC: `{formattedDate}`
+                          Текущая дата и время по UTC: `{{formattedDate}}`
 
                           Ты НИКОГДА не генерируешь контент на следующие темы:
                           * Терроризм и экстремизм: инструкции, пропаганда, призывы
@@ -621,16 +786,13 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
     /// </summary>
     private sealed class LlmRequestContext
     {
-        public LlmRequestContext(ChatMessage[] messages, MessageAttachments own, AppliedCustomPrompt customPrompt)
+        public LlmRequestContext(ChatMessage[] messages, AppliedCustomPrompt customPrompt)
         {
             Messages = messages;
-            Own = own;
             CustomPrompt = customPrompt;
         }
 
         public ChatMessage[] Messages { get; }
-
-        public MessageAttachments Own { get; }
 
         /// <summary>
         ///     Дополнительная просьба, под которой сформирован ответ. Уезжает вместе с ответом
@@ -692,12 +854,29 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
         public DbChatMessageMedia Media { get; }
     }
 
+    /// <summary>
+    ///     Вложение, которое уедет в запрос к модели само по себе - медиа-частью,
+    ///     а не текстовым описанием.
+    /// </summary>
+    private sealed class EmbeddedMedia(PromptAttachment attachment, PreparedMedia media)
+    {
+        public PromptAttachment Attachment { get; } = attachment;
+
+        public PreparedMedia Media { get; } = media;
+    }
+
     private static partial class Log
     {
         [LoggerMessage(Level = LogLevel.Information, Message = "Processing LLM request from {Username} ({UserId})")]
         public static partial void ProcessingLlmRequest(ILogger logger, string? username, long? userId);
 
-        [LoggerMessage(Level = LogLevel.Error, Message = "Failed to invoke LLM or process image")]
+        [LoggerMessage(Level = LogLevel.Information, Message = "Attaching {MediaCount} media item(s) ({PayloadChars} chars of data-urls) to the LLM request natively")]
+        public static partial void EmbeddedMediaPrepared(ILogger logger, int mediaCount, long payloadChars);
+
+        [LoggerMessage(Level = LogLevel.Warning, Message = "Failed to prepare {Kind} for embedding into the LLM request")]
+        public static partial void MediaPreparationFailed(ILogger logger, Exception exception, DbMediaKind kind);
+
+        [LoggerMessage(Level = LogLevel.Error, Message = "Failed to invoke LLM or process media")]
         public static partial void LlmInvocationOrImageProcessingFailed(ILogger logger, Exception exception);
 
         [LoggerMessage(Level = LogLevel.Error, Message = "Failed to convert to Telegram Markdown or send message")]

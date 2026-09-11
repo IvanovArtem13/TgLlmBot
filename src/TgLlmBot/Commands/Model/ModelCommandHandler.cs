@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -47,8 +47,10 @@ public class ModelCommandHandler : AbstractCommandHandler<ModelCommand>
         builder.Append("Провайдер: `").Append(GetBaseUrl(options.Endpoint)).AppendLine("`");
         builder.Append("Модель: `").Append(options.Model).AppendLine("`");
         builder.AppendLine();
-        builder.Append("Провайдер (распознавание изображений): `").Append(GetBaseUrl(options.VisionEndpoint)).AppendLine("`");
-        builder.Append("Модель (распознавание изображений): `").Append(options.VisionModel).AppendLine("`");
+        builder.AppendLine("Капабилити модели:");
+        builder.Append("Картинки: `").Append(options.Image).AppendLine("`");
+        builder.Append("Видео: `").Append(options.Video).AppendLine("`");
+        builder.Append("Аудио: `").Append(options.Audio).AppendLine("`");
         var rawMarkdown = builder.ToString();
         var optimizedMarkdown = markdownConverter.ConvertToSolidTelegramMarkdown(rawMarkdown);
         return optimizedMarkdown;

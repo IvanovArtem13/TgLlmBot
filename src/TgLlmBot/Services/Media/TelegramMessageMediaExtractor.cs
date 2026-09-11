@@ -7,7 +7,7 @@ using TgLlmBot.DataAccess.Models;
 namespace TgLlmBot.Services.Media;
 
 /// <summary>
-///     Достаёт из сообщения Telegram список вложений, которые имеет смысл показать vision-модели.
+///     Достаёт из сообщения Telegram список вложений, которые имеет смысл показать модели.
 /// </summary>
 /// <remarks>
 ///     Telegram кладёт в одно сообщение не больше одного медиа-вложения: альбом приезжает

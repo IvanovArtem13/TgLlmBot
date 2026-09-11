@@ -1,31 +1,31 @@
-﻿using System;
+using System;
 
 namespace TgLlmBot.Commands.Model;
 
 public class ModelCommandHandlerOptions
 {
-    public ModelCommandHandlerOptions(Uri endpoint, string model, Uri visionEndpoint, string visionModel)
+    public ModelCommandHandlerOptions(Uri endpoint, string model, bool image, bool video, bool audio)
     {
         ArgumentNullException.ThrowIfNull(endpoint);
-        ArgumentNullException.ThrowIfNull(visionEndpoint);
         if (string.IsNullOrWhiteSpace(model))
         {
             throw new ArgumentException("Value cannot be null or whitespace.", nameof(model));
         }
 
-        if (string.IsNullOrWhiteSpace(visionModel))
-        {
-            throw new ArgumentException("Value cannot be null or whitespace.", nameof(visionModel));
-        }
-
         Endpoint = endpoint;
         Model = model;
-        VisionEndpoint = visionEndpoint;
-        VisionModel = visionModel;
+        Image = image;
+        Video = video;
+        Audio = audio;
     }
 
     public Uri Endpoint { get; }
+
     public string Model { get; }
-    public Uri VisionEndpoint { get; }
-    public string VisionModel { get; }
+
+    public bool Image { get; }
+
+    public bool Video { get; }
+
+    public bool Audio { get; }
 }

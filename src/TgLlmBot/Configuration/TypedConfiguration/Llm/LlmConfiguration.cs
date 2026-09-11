@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using TgLlmBot.Configuration.Options.Llm;
 
 namespace TgLlmBot.Configuration.TypedConfiguration.Llm;
@@ -10,10 +10,10 @@ public class LlmConfiguration
         string apiKey,
         string model,
         string defaultResponse,
-        LlmVisionConfiguration vision)
+        LlmCapabilitiesConfiguration capabilities)
     {
         ArgumentNullException.ThrowIfNull(endpoint);
-        ArgumentNullException.ThrowIfNull(vision);
+        ArgumentNullException.ThrowIfNull(capabilities);
         if (string.IsNullOrEmpty(apiKey))
         {
             throw new ArgumentException("Value cannot be null or empty.", nameof(apiKey));
@@ -33,14 +33,19 @@ public class LlmConfiguration
         ApiKey = apiKey;
         Model = model;
         DefaultResponse = defaultResponse;
-        Vision = vision;
+        Capabilities = capabilities;
     }
 
     public Uri Endpoint { get; }
     public string ApiKey { get; }
     public string Model { get; }
     public string DefaultResponse { get; }
-    public LlmVisionConfiguration Vision { get; }
+
+    /// <summary>
+    ///     Капабилити модели: какие вложения она видит сама. Одна модель на всё - и на текст,
+    ///     и на вложения, если капабилити позволяют.
+    /// </summary>
+    public LlmCapabilitiesConfiguration Capabilities { get; }
 
     public static LlmConfiguration Convert(LlmOptions options)
     {
@@ -50,12 +55,12 @@ public class LlmConfiguration
             throw new ArgumentException("Invalid endpoint.", nameof(options));
         }
 
-        var vision = LlmVisionConfiguration.Convert(options.Vision);
+        var capabilities = LlmCapabilitiesConfiguration.Convert(options.Capabilities);
         return new(
             typedEndpoint,
             options.ApiKey,
             options.Model,
             options.DefaultResponse,
-            vision);
+            capabilities);
     }
 }

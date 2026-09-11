@@ -1,4 +1,4 @@
-﻿using System.ComponentModel.DataAnnotations;
+using System.ComponentModel.DataAnnotations;
 
 namespace TgLlmBot.Configuration.Options.Llm;
 
@@ -21,6 +21,9 @@ public class LlmOptions
     [MaxLength(10000)]
     public string DefaultResponse { get; set; } = default!;
 
+    /// <summary>
+    ///     Капабилити модели. Не обязательны: без секции модель считается чисто текстовой.
+    /// </summary>
     [Required]
-    public LlmVisionOptions Vision { get; set; } = default!;
+    public LlmCapabilitiesOptions Capabilities { get; set; } = new();
 }

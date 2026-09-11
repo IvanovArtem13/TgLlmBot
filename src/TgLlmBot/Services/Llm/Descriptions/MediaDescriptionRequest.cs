@@ -2,24 +2,26 @@ using System;
 using TgLlmBot.DataAccess.Models;
 using TgLlmBot.Services.Media;
 
-namespace TgLlmBot.Services.Llm.Vision;
+namespace TgLlmBot.Services.Llm.Descriptions;
 
 /// <summary>
-///     Всё, что нужно знать vision-модели о вложении, которое её просят описать.
+///     Всё, что нужно знать о вложении, чтобы описать его для истории чата.
 /// </summary>
-public sealed class MediaRecognitionRequest
+public sealed class MediaDescriptionRequest
 {
-    public MediaRecognitionRequest(
+    public MediaDescriptionRequest(
         PreparedMedia media,
         DbMediaKind kind,
         bool isAnimated,
-        string? relatedText)
+        string? relatedText,
+        string? historyContext)
     {
         ArgumentNullException.ThrowIfNull(media);
         Media = media;
         Kind = kind;
         IsAnimated = isAnimated;
         RelatedText = relatedText;
+        HistoryContext = historyContext;
     }
 
     /// <summary>
@@ -41,8 +43,14 @@ public sealed class MediaRecognitionRequest
     public bool IsAnimated { get; }
 
     /// <summary>
-    ///     Текст, с которым вложение пришло в чат (подпись). Нужен, чтобы модель уделила
-    ///     внимание релевантным деталям. Может отсутствовать.
+    ///     Текст, с которым вложение пришло в чат (подпись). Нужен, чтобы в описании уцелели
+    ///     детали, без которых текст не понять. Может отсутствовать.
     /// </summary>
     public string? RelatedText { get; }
+
+    /// <summary>
+    ///     История чата до сообщения с вложением (JSON по общему правилу 200 сообщений /
+    ///     30 000 символов). Нужна, чтобы понять, какие детали вложения важно сохранить.
+    /// </summary>
+    public string? HistoryContext { get; }
 }

@@ -11,8 +11,8 @@ using TgLlmBot.Services.Media;
 namespace TgLlmBot.Services.Llm;
 
 /// <summary>
-///     Сериализует историю чата в формат JSON, который читает основная модель: и при формировании
-///     ответа, и при компактинге описаний вложений.
+///     Сериализует историю чата в формат JSON, который читает модель: и при формировании
+///     ответа, и при описании вложений.
 /// </summary>
 public static class ChatHistoryJsonBuilder
 {
@@ -115,8 +115,8 @@ public static class ChatHistoryJsonBuilder
     }
 
     /// <summary>
-    ///     История в виде строки JSON - по одному сообщению на строку. Используется компактингом
-    ///     описаний вложений.
+    ///     История в виде строки JSON - по одному сообщению на строку. Используется описателем
+    ///     вложений.
     /// </summary>
     public static string BuildJsonHistory(DbChatMessage[] contextMessages, HashSet<int>? excludedMessageIds = null)
     {
@@ -132,8 +132,8 @@ public static class ChatHistoryJsonBuilder
     }
 
     /// <summary>
-    ///     Текст, который модель увидит вместо картинки: сжатое описание, а если его ещё нет -
-    ///     объяснение по состоянию распознавания.
+    ///     Текст, который модель увидит вместо вложения: компактное описание, а если его ещё нет -
+    ///     объяснение по состоянию обработки.
     /// </summary>
     public static string DescribeMedia(DbChatMessageMedia media)
     {
