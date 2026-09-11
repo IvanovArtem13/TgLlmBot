@@ -47,7 +47,7 @@ public class ModelCommandHandler : AbstractCommandHandler<ModelCommand>
         builder.Append("Провайдер: `").Append(GetBaseUrl(options.Endpoint)).AppendLine("`");
         builder.Append("Модель: `").Append(options.Model).AppendLine("`");
         builder.AppendLine();
-        builder.AppendLine("Капабилити модели:");
+        builder.AppendLine("Возможности модели:");
         builder.Append("Картинки: `").Append(options.Image).AppendLine("`");
         builder.Append("Видео: `").Append(options.Video).AppendLine("`");
         builder.Append("Аудио: `").Append(options.Audio).AppendLine("`");
