@@ -1,35 +1,22 @@
-﻿using System;
+using System;
 
 namespace TgLlmBot.Services.Mcp.Clients.Github;
 
 public class DefaultGithubMcpClientFactoryOptions
 {
-    public DefaultGithubMcpClientFactoryOptions(
-        string githubPat,
-        string workingDirectory,
-        string command)
+    public DefaultGithubMcpClientFactoryOptions(Uri endpoint, string githubPat)
     {
+        ArgumentNullException.ThrowIfNull(endpoint);
+
         if (string.IsNullOrEmpty(githubPat))
         {
             throw new ArgumentException("Value cannot be null or empty.", nameof(githubPat));
         }
 
-        if (string.IsNullOrEmpty(workingDirectory))
-        {
-            throw new ArgumentException("Value cannot be null or empty.", nameof(workingDirectory));
-        }
-
-        if (string.IsNullOrEmpty(command))
-        {
-            throw new ArgumentException("Value cannot be null or empty.", nameof(command));
-        }
-
+        Endpoint = endpoint;
         GithubPat = githubPat;
-        WorkingDirectory = workingDirectory;
-        Command = command;
     }
 
+    public Uri Endpoint { get; }
     public string GithubPat { get; }
-    public string WorkingDirectory { get; }
-    public string Command { get; }
 }

@@ -1,51 +1,38 @@
-﻿using System;
-using System.IO;
+using System;
 using TgLlmBot.Configuration.Options.Mcp;
 
 namespace TgLlmBot.Configuration.TypedConfiguration.Mcp;
 
 public class McpGithubConfiguration
 {
-    private McpGithubConfiguration(string personalAccessToken, string workingDirectory, string command)
+    private McpGithubConfiguration(Uri endpoint, string personalAccessToken)
     {
-        if (string.IsNullOrWhiteSpace(personalAccessToken))
-        {
-            throw new ArgumentException("Value cannot be null or whitespace.", nameof(personalAccessToken));
-        }
-
-        if (string.IsNullOrWhiteSpace(workingDirectory))
-        {
-            throw new ArgumentException("Value cannot be null or whitespace.", nameof(workingDirectory));
-        }
-
-        if (string.IsNullOrWhiteSpace(command))
-        {
-            throw new ArgumentException("Value cannot be null or whitespace.", nameof(command));
-        }
-
+        ArgumentNullException.ThrowIfNull(endpoint);
+        ArgumentNullException.ThrowIfNull(personalAccessToken);
+        Endpoint = endpoint;
         PersonalAccessToken = personalAccessToken;
-        WorkingDirectory = workingDirectory;
-        Command = command;
     }
+
+    public Uri Endpoint { get; }
 
     public string PersonalAccessToken { get; }
 
-    public string WorkingDirectory { get; }
-
-    public string Command { get; }
-
-    public static McpGithubConfiguration Convert(McpGithubOptions options)
+    public static McpGithubConfiguration? Convert(McpGithubOptions? options)
     {
-        ArgumentNullException.ThrowIfNull(options);
-        var directory = new DirectoryInfo(options.WorkingDirectory);
-        if (!directory.Exists)
+        if (options is null || !options.Enabled)
         {
-            throw new DirectoryNotFoundException($"The working directory {options.WorkingDirectory} was not found.");
+            return null;
         }
 
-        return new(
-            options.PersonalAccessToken,
-            directory.FullName,
-            options.Command);
+        if (string.IsNullOrWhiteSpace(options.PersonalAccessToken))
+        {
+            throw new ArgumentException(
+                "The Github MCP is enabled but no personal access token is configured. "
+                + "Set Mcp:Github:PersonalAccessToken (e.g. via User Secrets) or disable Mcp:Github:Enabled.",
+                nameof(options));
+        }
+
+        var endpoint = new Uri(options.Endpoint, UriKind.Absolute);
+        return new(endpoint, options.PersonalAccessToken);
     }
 }

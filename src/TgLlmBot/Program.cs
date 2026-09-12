@@ -50,6 +50,7 @@ using TgLlmBot.Services.DataAccess.SystemPrompts;
 using TgLlmBot.Services.DataAccess.TelegramMessages;
 using TgLlmBot.Services.Llm.Descriptions;
 using TgLlmBot.Services.Llm.Multimodal;
+using TgLlmBot.Services.Mcp.Clients.Exa;
 using TgLlmBot.Services.Mcp.Clients.Github;
 using TgLlmBot.Services.Mcp.Enums;
 using TgLlmBot.Services.Mcp.Tools;
@@ -142,11 +143,19 @@ public partial class Program
         {
             var toolsProvider = asyncScope.ServiceProvider.GetRequiredService<DefaultMcpToolsProvider>();
 
-            var github = asyncScope.ServiceProvider.GetRequiredKeyedService<McpClient>(McpClientName.Github);
+            var github = asyncScope.ServiceProvider.GetKeyedService<McpClient>(McpClientName.Github);
+            if (github is not null)
+            {
+                var githubTools = await github.ListToolsAsync();
+                toolsProvider.AddTools(githubTools);
+            }
 
-            var githubTools = await github.ListToolsAsync();
-
-            toolsProvider.AddTools(githubTools);
+            var exa = asyncScope.ServiceProvider.GetKeyedService<McpClient>(McpClientName.Exa);
+            if (exa is not null)
+            {
+                var exaTools = await exa.ListToolsAsync();
+                toolsProvider.AddTools(exaTools);
+            }
         }
     }
 
@@ -346,19 +355,34 @@ public partial class Program
         // MCP
         builder.Services.AddSingleton<DefaultMcpToolsProvider>();
         builder.Services.AddSingleton<IMcpToolsProvider>(resolver => resolver.GetRequiredService<DefaultMcpToolsProvider>());
-        // MCP - Github
-        builder.Services.AddHttpClient(DefaultGithubMcpClientFactory.GithubHttpClientName);
-        builder.Services.AddSingleton(new DefaultGithubMcpClientFactoryOptions(
-            config.Mcp.Github.PersonalAccessToken,
-            config.Mcp.Github.WorkingDirectory,
-            config.Mcp.Github.Command));
-        builder.Services.AddSingleton<IGithubMcpClientFactory, DefaultGithubMcpClientFactory>();
-        builder.Services.AddKeyedSingleton<McpClient>(McpClientName.Github,
-            (resolver, _) =>
-            {
-                var githubFactory = resolver.GetRequiredService<IGithubMcpClientFactory>();
-                return githubFactory.CreateAsync(CancellationToken.None).GetAwaiter().GetResult();
-            });
+        // MCP - Github (опциональный: отключается через Mcp:Github:Enabled, тогда PAT не требуется)
+        if (config.Mcp.Github is { } github)
+        {
+            builder.Services.AddHttpClient(DefaultGithubMcpClientFactory.GithubHttpClientName);
+            builder.Services.AddSingleton(new DefaultGithubMcpClientFactoryOptions(
+                github.Endpoint,
+                github.PersonalAccessToken));
+            builder.Services.AddSingleton<IGithubMcpClientFactory, DefaultGithubMcpClientFactory>();
+            builder.Services.AddKeyedSingleton<McpClient>(McpClientName.Github,
+                (resolver, _) =>
+                {
+                    var githubFactory = resolver.GetRequiredService<IGithubMcpClientFactory>();
+                    return githubFactory.CreateAsync(CancellationToken.None).GetAwaiter().GetResult();
+                });
+        }
+        // MCP - Exa (опциональный: отключается через Mcp:Exa:Enabled, тогда API-ключ не требуется)
+        if (config.Mcp.Exa is { } exa)
+        {
+            builder.Services.AddHttpClient(DefaultExaMcpClientFactory.ExaHttpClientName);
+            builder.Services.AddSingleton(new DefaultExaMcpClientFactoryOptions(exa.Endpoint, exa.ApiKey));
+            builder.Services.AddSingleton<IExaMcpClientFactory, DefaultExaMcpClientFactory>();
+            builder.Services.AddKeyedSingleton<McpClient>(McpClientName.Exa,
+                (resolver, _) =>
+                {
+                    var exaFactory = resolver.GetRequiredService<IExaMcpClientFactory>();
+                    return exaFactory.CreateAsync(CancellationToken.None).GetAwaiter().GetResult();
+                });
+        }
         // OpenRouter stats
         builder.Services.AddSingleton(new DefaultOpenRouterKeyUsageProviderOptions(config.Llm.ApiKey));
         builder.Services.AddHttpClient<IOpenRouterKeyUsageProvider, DefaultOpenRouterKeyUsageProvider>();

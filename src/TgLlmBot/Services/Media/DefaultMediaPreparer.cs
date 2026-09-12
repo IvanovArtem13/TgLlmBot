@@ -17,8 +17,9 @@ namespace TgLlmBot.Services.Media;
 ///         Модель одна на всё, и показать ей можно только то, что она видит: картинку при
 ///         включённом <see cref="LlmCapabilitiesConfiguration.Image" />, видео - при включённом
 ///         <see cref="LlmCapabilitiesConfiguration.Video" />. Чем вложение станет для модели,
-///         известно ещё до скачивания, поэтому не поддерживаемое основным файлом качается
-///         только ради превью - если уж и картинку модель не видит, качать нечего вовсе.
+///         известно ещё до скачивания, поэтому что капабилити не покрывают, не качается вовсе -
+///         ни основной файл, ни статическое превью: показывать модели один кадр видео незачем,
+///         если видео она смотреть не умеет.
 ///     </para>
 ///     <para>
 ///         Способов три. Картинка уходит как есть. Видео (WEBM видео-стикеров, MP4 гифок и видео)
@@ -64,9 +65,16 @@ public partial class DefaultMediaPreparer : IMediaPreparer
         ArgumentNullException.ThrowIfNull(media);
 
         // По виду вложения в чате понятно, чем оно станет для модели: если капабилити этого
-        // не покрывают, основной файл качать незачем
+        // не покрывают, ни основной файл, ни статическое превью качать незачем - модель
+        // такое не смотрит, и показывать ей один кадр видео вместо движения незачем
         var mainFileSupported = _capabilities.Supports(media.Kind, media.IsAnimated);
-        if (mainFileSupported && !string.IsNullOrEmpty(media.DownloadFileId))
+        if (!mainFileSupported)
+        {
+            Log.CapabilityNotCovered(_logger, media.FileUniqueId, media.Kind);
+            return Result<PreparedMedia>.Fail();
+        }
+
+        if (!string.IsNullOrEmpty(media.DownloadFileId))
         {
             var prepared = await PrepareFromFileAsync(media, media.DownloadFileId, cancellationToken);
             if (!prepared.IsFailed && _capabilities.Supports(prepared.Value.Kind))
@@ -145,6 +153,9 @@ public partial class DefaultMediaPreparer : IMediaPreparer
 
     private static partial class Log
     {
+        [LoggerMessage(Level = LogLevel.Information, Message = "Model capabilities do not cover {Kind} {FileUniqueId}, thumbnail is not prepared")]
+        public static partial void CapabilityNotCovered(ILogger logger, string fileUniqueId, DbMediaKind kind);
+
         [LoggerMessage(Level = LogLevel.Information, Message = "Falling back to the static thumbnail of {Kind} {FileUniqueId}")]
         public static partial void ThumbnailUsed(ILogger logger, string fileUniqueId, DbMediaKind kind);
 

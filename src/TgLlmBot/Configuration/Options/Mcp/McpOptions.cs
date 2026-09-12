@@ -1,9 +1,10 @@
-﻿using System.ComponentModel.DataAnnotations;
+using System.ComponentModel.DataAnnotations;
 
 namespace TgLlmBot.Configuration.Options.Mcp;
 
 public class McpOptions
 {
-    [Required]
-    public McpGithubOptions Github { get; set; } = default!;
+    public McpGithubOptions? Github { get; set; }
+
+    public McpExaOptions? Exa { get; set; }
 }

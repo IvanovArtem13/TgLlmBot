@@ -58,4 +58,15 @@ public sealed class LlmCapabilitiesConfiguration
             _ => false
         };
     }
+
+    /// <summary>
+    ///     Текст, который модель увидит вместо вложения, когда её капабилити его не покрывают.
+    ///     Без него модель считает вложение увиденным (или пытается разглядеть по одному
+    ///     статическому кадру) и отвечает так, будто видела движение, - а должна прямо сказать,
+    ///     что распознавание такого вложения не поддерживается.
+    /// </summary>
+    public static string DescribeUnsupported(DbMediaKind kind, bool isAnimated)
+    {
+        return $"Распознавание {MediaKindNames.DescribeGenitive(kind, isAnimated)} не поддерживается: модель не умеет смотреть такие вложения.";
+    }
 }

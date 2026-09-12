@@ -8,18 +8,18 @@ using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Client;
 using TgLlmBot.Services.Mcp.Enums;
 
-namespace TgLlmBot.Services.Mcp.Clients.Github;
+namespace TgLlmBot.Services.Mcp.Clients.Exa;
 
-public class DefaultGithubMcpClientFactory : IGithubMcpClientFactory
+public class DefaultExaMcpClientFactory : IExaMcpClientFactory
 {
-    public const string GithubHttpClientName = $"http-client-factory-{nameof(McpClientName.Github)}";
+    public const string ExaHttpClientName = $"http-client-factory-{nameof(McpClientName.Exa)}";
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly ILoggerFactory _loggerFactory;
 
-    private readonly DefaultGithubMcpClientFactoryOptions _options;
+    private readonly DefaultExaMcpClientFactoryOptions _options;
 
-    public DefaultGithubMcpClientFactory(
-        DefaultGithubMcpClientFactoryOptions options,
+    public DefaultExaMcpClientFactory(
+        DefaultExaMcpClientFactoryOptions options,
         ILoggerFactory loggerFactory,
         IHttpClientFactory httpClientFactory)
     {
@@ -35,15 +35,15 @@ public class DefaultGithubMcpClientFactory : IGithubMcpClientFactory
     public async Task<McpClient> CreateAsync(CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var httpClient = _httpClientFactory.CreateClient(GithubHttpClientName);
+        var httpClient = _httpClientFactory.CreateClient(ExaHttpClientName);
         var transport = new HttpClientTransport(
             new HttpClientTransportOptions
             {
                 Endpoint = _options.Endpoint,
-                Name = nameof(McpClientName.Github),
+                Name = nameof(McpClientName.Exa),
                 AdditionalHeaders = new Dictionary<string, string>
                 {
-                    { "Authorization", $"Bearer {_options.GithubPat}" }
+                    { "x-api-key", _options.ApiKey }
                 }
             },
             httpClient,

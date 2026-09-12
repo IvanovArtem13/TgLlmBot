@@ -8,6 +8,7 @@ using System.Threading.Channels;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using TgLlmBot.Configuration.TypedConfiguration.Llm;
 using TgLlmBot.DataAccess.Models;
 using TgLlmBot.Services.DataAccess.MediaDescriptions;
 using TgLlmBot.Services.DataAccess.TelegramMessages;
@@ -35,6 +36,7 @@ public partial class MediaRecognitionBackgroundService : BackgroundService
     private readonly IMediaPreparer _preparer;
     private readonly IMediaRecognitionQueues _queues;
     private readonly ITelegramMessageStorage _storage;
+    private readonly LlmCapabilitiesConfiguration _capabilities;
 
     /// <summary>
     ///     Сообщения, задания по которым подчистка уже переставила в очередь и которые ещё не разобраны.
@@ -51,6 +53,7 @@ public partial class MediaRecognitionBackgroundService : BackgroundService
         IMediaDescriber describer,
         IMediaDescriptionCache descriptionCache,
         ITelegramMessageStorage storage,
+        LlmCapabilitiesConfiguration capabilities,
         ILogger<MediaRecognitionBackgroundService> logger)
     {
         ArgumentNullException.ThrowIfNull(options);
@@ -60,6 +63,7 @@ public partial class MediaRecognitionBackgroundService : BackgroundService
         ArgumentNullException.ThrowIfNull(describer);
         ArgumentNullException.ThrowIfNull(descriptionCache);
         ArgumentNullException.ThrowIfNull(storage);
+        ArgumentNullException.ThrowIfNull(capabilities);
         ArgumentNullException.ThrowIfNull(logger);
         _options = options;
         _timeProvider = timeProvider;
@@ -68,6 +72,7 @@ public partial class MediaRecognitionBackgroundService : BackgroundService
         _describer = describer;
         _descriptionCache = descriptionCache;
         _storage = storage;
+        _capabilities = capabilities;
         _logger = logger;
     }
 
@@ -296,6 +301,15 @@ public partial class MediaRecognitionBackgroundService : BackgroundService
         string? historyJson,
         CancellationToken cancellationToken)
     {
+        if (!_capabilities.Supports(media.Kind, media.IsAnimated))
+        {
+            // Капабилити модели вложение не покрывают: ни качать, ни описывать его незачем -
+            // в историю уходит пометка, что распознавание такого вложения не поддерживается
+            media.ShortDescription = LlmCapabilitiesConfiguration.DescribeUnsupported(media.Kind, media.IsAnimated);
+            media.Status = DbMediaRecognitionStatus.Unsupported;
+            return null;
+        }
+
         if (!media.HasShowableFile)
         {
             // Показать модели нечего: у вложения нет ни своего файла, ни превью

@@ -1,6 +1,7 @@
-﻿namespace TgLlmBot.Services.Mcp.Enums;
+namespace TgLlmBot.Services.Mcp.Enums;
 
 public enum McpClientName
 {
-    Github
+    Github,
+    Exa
 }
