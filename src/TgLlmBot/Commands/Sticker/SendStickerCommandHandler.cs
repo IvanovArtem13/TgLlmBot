@@ -17,6 +17,8 @@ public class SendStickerCommandHandler : AbstractCommandHandler<SendStickerComma
 
     private readonly ITelegramMessageStorage _storage;
 
+    private const string AvailableStickers = "alz; hands";
+
     public SendStickerCommandHandler(ITelegramMessageStorage storage, TelegramBotClient bot)
     {
         _storage = storage;
@@ -33,7 +35,18 @@ public class SendStickerCommandHandler : AbstractCommandHandler<SendStickerComma
 
         var sticker = FromUserPrompt(userPrompt);
         if (sticker == null)
+        {
+            await _bot.SendMessage(
+            command.Message.Chat,
+            $"Стикер отсутствует. Доступные стикеры: {AvailableStickers}",
+            replyParameters: new()
+            {
+                MessageId = command.Message.MessageId
+            },
+            cancellationToken: cancellationToken);
+
             return;
+        }
 
         var response = await _bot.SendPhoto(
                     command.Message.Chat,
